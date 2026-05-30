@@ -1,3 +1,4 @@
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::ffi::OsString;
@@ -8,6 +9,50 @@ use std::process::{Command, ExitCode, Stdio};
 
 const DEFAULT_MAX_BOOKMARKS: usize = 10;
 const SESSION_NAME: &str = "bmersive";
+
+#[derive(Debug, Parser)]
+#[command(author, version, about)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<CliCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+enum CliCommand {
+    /// Emit shell integration code.
+    Init { shell: Shell },
+    /// Add the current directory or an explicit path.
+    Add { path: Option<PathBuf> },
+    /// List bookmarked directories.
+    Ls,
+    /// Print the bookmarked path for an index.
+    Path { index: usize },
+    /// Remove a bookmark by index, or prompt when omitted.
+    Rm { index: Option<usize> },
+    /// Create or attach to a tmux workspace.
+    Tmux { mode: Option<TmuxMode> },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum Shell {
+    Zsh,
+    Bash,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum TmuxMode {
+    Windows,
+    Panes,
+}
+
+impl TmuxMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Windows => "windows",
+            Self::Panes => "panes",
+        }
+    }
+}
 
 #[derive(Debug)]
 struct CliError(String);
@@ -71,7 +116,15 @@ enum TmuxAction {
 }
 
 fn main() -> ExitCode {
-    match run(env::args_os().skip(1).collect()) {
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            let _ = error.print();
+            return ExitCode::from(error.exit_code() as u8);
+        }
+    };
+
+    match execute(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("bmersive: {error}");
@@ -80,38 +133,20 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(args: Vec<OsString>) -> Result<(), CliError> {
-    let args = args
-        .into_iter()
-        .map(|arg| {
-            arg.into_string()
-                .map_err(|_| CliError::new("arguments must be valid UTF-8"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    match args.first().map(String::as_str) {
-        Some("init") => init(args.get(1).map(String::as_str)),
-        Some("add") => add(args.get(1).map(String::as_str)),
-        Some("ls") => list(),
-        Some("path") => path(args.get(1).map(String::as_str)),
-        Some("rm") => remove(args.get(1).map(String::as_str)),
-        Some("tmux") => tmux(args.get(1).map(String::as_str)),
-        Some("help") | Some("--help") | Some("-h") | None => {
-            print_help();
+fn execute(cli: Cli) -> Result<(), CliError> {
+    match cli.command {
+        Some(CliCommand::Init { shell }) => init(shell),
+        Some(CliCommand::Add { path }) => add(path),
+        Some(CliCommand::Ls) => list(),
+        Some(CliCommand::Path { index }) => path(index),
+        Some(CliCommand::Rm { index }) => remove(index),
+        Some(CliCommand::Tmux { mode }) => tmux(mode),
+        None => {
+            Cli::command().print_help()?;
+            println!();
             Ok(())
         }
-        Some(command) => Err(CliError::new(format!("unknown command: {command}"))),
     }
-}
-
-fn print_help() {
-    println!("bmersive commands:");
-    println!("  init <zsh|bash>");
-    println!("  add [path]");
-    println!("  ls");
-    println!("  path <index>");
-    println!("  rm [index]");
-    println!("  tmux [windows|panes]");
 }
 
 fn state_path() -> PathBuf {
@@ -198,8 +233,8 @@ fn normalize_absolute_path(path: &Path) -> PathBuf {
     normalized
 }
 
-fn add(path_arg: Option<&str>) -> Result<(), CliError> {
-    let target = path_arg.map(PathBuf::from).unwrap_or(env::current_dir()?);
+fn add(path_arg: Option<PathBuf>) -> Result<(), CliError> {
+    let target = path_arg.unwrap_or(env::current_dir()?);
     let normalized = normalize_path(&target)?;
     let bookmark = path_to_string(&normalized)?;
     let path = state_path();
@@ -241,8 +276,7 @@ fn list() -> Result<(), CliError> {
     Ok(())
 }
 
-fn path(index_arg: Option<&str>) -> Result<(), CliError> {
-    let index = parse_index(index_arg)?;
+fn path(index: usize) -> Result<(), CliError> {
     let state = load_state(&state_path())?;
     let bookmark = state
         .bookmarks
@@ -253,7 +287,7 @@ fn path(index_arg: Option<&str>) -> Result<(), CliError> {
     Ok(())
 }
 
-fn remove(index_arg: Option<&str>) -> Result<(), CliError> {
+fn remove(index_arg: Option<usize>) -> Result<(), CliError> {
     let path = state_path();
     let mut state = load_state(&path)?;
 
@@ -263,7 +297,7 @@ fn remove(index_arg: Option<&str>) -> Result<(), CliError> {
     }
 
     let index = match index_arg {
-        Some(_) => parse_index(index_arg)?,
+        Some(index) => index,
         None => prompt_remove_index(&state)?,
     };
 
@@ -299,15 +333,9 @@ fn parse_index(index_arg: Option<&str>) -> Result<usize, CliError> {
         .map_err(|_| CliError::new("bookmark index must be a non-negative integer"))
 }
 
-fn init(shell: Option<&str>) -> Result<(), CliError> {
-    match shell {
-        Some("zsh") | Some("bash") => {
-            println!("{}", shell_function());
-            Ok(())
-        }
-        Some(other) => Err(CliError::new(format!("unsupported shell: {other}"))),
-        None => Err(CliError::new("missing shell: expected zsh or bash")),
-    }
+fn init(_shell: Shell) -> Result<(), CliError> {
+    println!("{}", shell_function());
+    Ok(())
 }
 
 fn shell_function() -> &'static str {
@@ -348,8 +376,10 @@ b() {
 }"#
 }
 
-fn tmux(mode_arg: Option<&str>) -> Result<(), CliError> {
-    let mode = mode_arg.unwrap_or(default_tmux_mode());
+fn tmux(mode_arg: Option<TmuxMode>) -> Result<(), CliError> {
+    let mode = mode_arg
+        .map(TmuxMode::as_str)
+        .unwrap_or(default_tmux_mode());
     let state = load_state(&state_path())?;
 
     if state.bookmarks.is_empty() {

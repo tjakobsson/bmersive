@@ -6,5 +6,6 @@ license = "MIT"
 description = "A curated, session-oriented directory workspace tool"
 
 [dependencies]
+clap = { version = "4.6.1", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

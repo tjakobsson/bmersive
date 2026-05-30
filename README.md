@@ -18,6 +18,8 @@ For local development without installing:
 cargo run -- <command>
 ```
 
+`bmersive --help` prints the generated command help, and `bmersive --version` prints the installed version.
+
 ## Shell Setup
 
 Add one of these lines to your shell startup file.
