@@ -24,6 +24,13 @@ fn run(runtime: &Path, args: &[&str]) -> std::process::Output {
         .expect("run bmersive test command")
 }
 
+fn run_without_runtime(args: &[&str]) -> std::process::Output {
+    Command::new(binary())
+        .args(args)
+        .output()
+        .expect("run bmersive test command")
+}
+
 #[test]
 fn add_list_path_and_remove_bookmarks() {
     let runtime = temp_runtime("crud");
@@ -152,4 +159,70 @@ fn init_outputs_shell_wrapper() {
     assert!(String::from_utf8(bash.stdout)
         .expect("bash init output is UTF-8")
         .contains("b()"));
+}
+
+#[test]
+fn generated_help_lists_supported_commands() {
+    let help = run_without_runtime(&["--help"]);
+    assert!(help.status.success());
+    let stdout = String::from_utf8(help.stdout).expect("help output is UTF-8");
+    assert!(stdout.contains("Commands:"));
+    assert!(stdout.contains("init"));
+    assert!(stdout.contains("add"));
+    assert!(stdout.contains("ls"));
+    assert!(stdout.contains("path"));
+    assert!(stdout.contains("rm"));
+    assert!(stdout.contains("tmux"));
+
+    let help_command = run_without_runtime(&["help"]);
+    assert!(help_command.status.success());
+    assert!(String::from_utf8(help_command.stdout)
+        .expect("help command output is UTF-8")
+        .contains("Commands:"));
+}
+
+#[test]
+fn generated_command_help_describes_arguments() {
+    let path_help = run_without_runtime(&["path", "--help"]);
+    assert!(path_help.status.success());
+    let stdout = String::from_utf8(path_help.stdout).expect("path help output is UTF-8");
+    assert!(stdout.contains("Usage:"));
+    assert!(stdout.contains("<INDEX>"));
+
+    let tmux_help = run_without_runtime(&["tmux", "--help"]);
+    assert!(tmux_help.status.success());
+    assert!(String::from_utf8(tmux_help.stdout)
+        .expect("tmux help output is UTF-8")
+        .contains("[MODE]"));
+}
+
+#[test]
+fn generated_version_uses_package_version() {
+    let version = run_without_runtime(&["--version"]);
+    assert!(version.status.success());
+    assert_eq!(
+        String::from_utf8(version.stdout)
+            .expect("version output is UTF-8")
+            .trim(),
+        concat!("bmersive ", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
+fn invalid_cli_input_fails_before_side_effects() {
+    let runtime = temp_runtime("invalid");
+
+    let unknown = run(&runtime, &["unknown-command"]);
+    assert!(!unknown.status.success());
+    assert!(String::from_utf8(unknown.stderr)
+        .expect("unknown command stderr is UTF-8")
+        .contains("unrecognized subcommand"));
+
+    let missing_index = run(&runtime, &["path"]);
+    assert!(!missing_index.status.success());
+    assert!(String::from_utf8(missing_index.stderr)
+        .expect("missing index stderr is UTF-8")
+        .contains("required arguments"));
+
+    assert!(!runtime.join("bmersive").join("bookmarks.json").exists());
 }
