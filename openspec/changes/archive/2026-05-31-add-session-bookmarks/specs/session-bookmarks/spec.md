@@ -1,8 +1,4 @@
-## Purpose
-
-Manage named saved directory bookmark sessions with shell-friendly indexed lookup.
-
-## Requirements
+## ADDED Requirements
 
 ### Requirement: Saved session bookmark storage
 The system SHALL store multiple named saved sessions in durable state, with each saved session containing its own ordered bookmark list.
@@ -14,21 +10,6 @@ The system SHALL store multiple named saved sessions in durable state, with each
 #### Scenario: Saved sessions outlive shell runtime state
 - **WHEN** a shell session exits after saving bookmarks in a named session
 - **THEN** a later shell can select the same named session and access its bookmarks
-
-### Requirement: Session-local bookmark storage
-The system SHALL store the current shell's appointed session in shell-local runtime state and SHALL store saved session bookmark lists in durable bmersive state.
-
-#### Scenario: Shell session state directory is available
-- **WHEN** `BMERSIVE_STATE_DIR` is set and the user appoints a session
-- **THEN** the system stores the appointment under `BMERSIVE_STATE_DIR`
-
-#### Scenario: Runtime directory is available
-- **WHEN** `XDG_RUNTIME_DIR` is set and durable state is needed without a more specific user state directory
-- **THEN** the system uses a bmersive state location under the available user runtime or state directory
-
-#### Scenario: Runtime directory is unavailable
-- **WHEN** no user state or runtime directory is available and durable state is needed
-- **THEN** the system uses a `/tmp/bmersive-$USER` fallback for saved session state
 
 ### Requirement: Appointed session controls bookmark commands
 The system SHALL apply bookmark add, list, path lookup, and remove commands to the currently appointed saved session.
@@ -127,6 +108,23 @@ The system SHALL preserve existing single-session bookmark state by importing it
 - **WHEN** both the new sessions state and the old `bookmarks.json` exist
 - **THEN** the system uses the new sessions state as the source of truth
 
+## MODIFIED Requirements
+
+### Requirement: Session-local bookmark storage
+The system SHALL store the current shell's appointed session in shell-local runtime state and SHALL store saved session bookmark lists in durable bmersive state.
+
+#### Scenario: Shell session state directory is available
+- **WHEN** `BMERSIVE_STATE_DIR` is set and the user appoints a session
+- **THEN** the system stores the appointment under `BMERSIVE_STATE_DIR`
+
+#### Scenario: Runtime directory is available
+- **WHEN** `XDG_RUNTIME_DIR` is set and durable state is needed without a more specific user state directory
+- **THEN** the system uses a bmersive state location under the available user runtime or state directory
+
+#### Scenario: Runtime directory is unavailable
+- **WHEN** no user state or runtime directory is available and durable state is needed
+- **THEN** the system uses a `/tmp/bmersive-$USER` fallback for saved session state
+
 ### Requirement: Add bookmark
 The system SHALL allow users to add the current directory or an explicit path to the appointed session's bookmark list using `bmersive add [path]`.
 
@@ -195,29 +193,3 @@ The system SHALL remove bookmarks from the appointed session by index using `bme
 #### Scenario: Prompted remove
 - **WHEN** the appointed session is `api` and the user runs `bmersive rm` and enters a valid listed index at the prompt
 - **THEN** the system removes the selected bookmark from `api`
-
-### Requirement: Bookmark commands use standardized CLI parsing
-The system SHALL expose bookmark commands through the standardized CLI parser while preserving their existing bookmark behavior.
-
-#### Scenario: Add command through parser
-- **WHEN** the user runs `bmersive add` or `bmersive add <path>`
-- **THEN** the parser accepts the command and the system applies the existing add bookmark behavior
-
-#### Scenario: List command through parser
-- **WHEN** the user runs `bmersive ls`
-- **THEN** the parser accepts the command and the system applies the existing list bookmark behavior
-
-#### Scenario: Path command through parser
-- **WHEN** the user runs `bmersive path <index>`
-- **THEN** the parser accepts the command and the system applies the existing path lookup behavior
-
-#### Scenario: Remove command through parser
-- **WHEN** the user runs `bmersive rm` or `bmersive rm <index>`
-- **THEN** the parser accepts the command and the system applies the existing remove bookmark behavior
-
-### Requirement: Bookmark parser validation avoids state changes
-The system SHALL reject invalid bookmark command forms before reading from or writing to bookmark state when validation can be performed by the CLI parser.
-
-#### Scenario: Missing path index
-- **WHEN** the user runs `bmersive path` without an index
-- **THEN** the system exits with CLI usage guidance and does not modify bookmark state

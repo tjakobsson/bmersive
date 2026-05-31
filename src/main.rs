@@ -1,5 +1,6 @@
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -9,6 +10,7 @@ use std::process::{Command, ExitCode, Stdio};
 
 const DEFAULT_MAX_BOOKMARKS: usize = 10;
 const SESSION_NAME: &str = "bmersive";
+const DEFAULT_IMPORTED_SESSION: &str = "default";
 
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
@@ -29,8 +31,38 @@ enum CliCommand {
     Path { index: usize },
     /// Remove a bookmark by index, or prompt when omitted.
     Rm { index: Option<usize> },
+    /// Manage saved bookmark sessions.
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
     /// Create or attach to a tmux workspace.
     Tmux { mode: Option<TmuxMode> },
+}
+
+#[derive(Debug, Subcommand)]
+enum SessionCommand {
+    /// List saved sessions.
+    Ls,
+    /// Create a saved session.
+    New { name: String },
+    /// Appoint a saved session for this shell.
+    Use {
+        name: String,
+        /// Appoint the session without jumping to bookmark 0.
+        #[arg(long)]
+        no_jump: bool,
+    },
+    /// Choose and appoint a saved session interactively.
+    Choose {
+        /// Appoint the session without jumping to bookmark 0.
+        #[arg(long)]
+        no_jump: bool,
+    },
+    /// Clear the appointed session for this shell.
+    Unset,
+    /// Print the appointed session.
+    Current,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -88,6 +120,11 @@ struct BookmarkState {
     bookmarks: Vec<String>,
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct SessionsState {
+    sessions: BTreeMap<String, BookmarkState>,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum TmuxAction {
     HasSession {
@@ -140,6 +177,7 @@ fn execute(cli: Cli) -> Result<(), CliError> {
         Some(CliCommand::Ls) => list(),
         Some(CliCommand::Path { index }) => path(index),
         Some(CliCommand::Rm { index }) => remove(index),
+        Some(CliCommand::Session { command }) => session(command),
         Some(CliCommand::Tmux { mode }) => tmux(mode),
         None => {
             Cli::command().print_help()?;
@@ -155,6 +193,48 @@ fn state_path() -> PathBuf {
         env::var_os("XDG_RUNTIME_DIR"),
         env::var("USER").ok(),
     )
+}
+
+fn sessions_state_path() -> PathBuf {
+    sessions_state_path_from(
+        env::var_os("XDG_STATE_HOME"),
+        env::var_os("HOME"),
+        env::var("USER").ok(),
+    )
+}
+
+fn sessions_state_path_from(
+    xdg_state_home: Option<OsString>,
+    home: Option<OsString>,
+    user: Option<String>,
+) -> PathBuf {
+    if let Some(state_home) = xdg_state_home.filter(|value| !value.is_empty()) {
+        return PathBuf::from(state_home)
+            .join("bmersive")
+            .join("sessions.json");
+    }
+
+    if let Some(home) = home.filter(|value| !value.is_empty()) {
+        return PathBuf::from(home)
+            .join(".local")
+            .join("state")
+            .join("bmersive")
+            .join("sessions.json");
+    }
+
+    let user = user.unwrap_or_else(|| "unknown".to_string());
+    PathBuf::from(format!("/tmp/bmersive-{user}")).join("sessions.json")
+}
+
+fn appointment_path() -> Result<PathBuf, CliError> {
+    appointment_path_from(env::var_os("BMERSIVE_STATE_DIR"))
+}
+
+fn appointment_path_from(state_dir: Option<OsString>) -> Result<PathBuf, CliError> {
+    state_dir
+        .filter(|value| !value.is_empty())
+        .map(|value| PathBuf::from(value).join("session"))
+        .ok_or_else(|| CliError::new("no session selected. Run: b session choose"))
 }
 
 fn state_path_from(
@@ -184,6 +264,7 @@ fn load_state(path: &Path) -> Result<BookmarkState, CliError> {
     }
 }
 
+#[cfg(test)]
 fn save_state(path: &Path, state: &BookmarkState) -> Result<(), CliError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -192,6 +273,111 @@ fn save_state(path: &Path, state: &BookmarkState) -> Result<(), CliError> {
     let contents = serde_json::to_string_pretty(state)?;
     fs::write(path, format!("{contents}\n"))?;
     Ok(())
+}
+
+fn load_sessions_state() -> Result<SessionsState, CliError> {
+    load_sessions_state_from(&sessions_state_path(), &state_path())
+}
+
+fn load_sessions_state_from(path: &Path, legacy_path: &Path) -> Result<SessionsState, CliError> {
+    match fs::read_to_string(path) {
+        Ok(contents) => Ok(serde_json::from_str(&contents)?),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => import_legacy_state(legacy_path),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn import_legacy_state(legacy_path: &Path) -> Result<SessionsState, CliError> {
+    let legacy = load_state(legacy_path)?;
+    let mut state = SessionsState::default();
+
+    if !legacy.bookmarks.is_empty() {
+        state
+            .sessions
+            .insert(DEFAULT_IMPORTED_SESSION.to_string(), legacy);
+    }
+
+    Ok(state)
+}
+
+fn save_sessions_state(state: &SessionsState) -> Result<(), CliError> {
+    save_sessions_state_to(&sessions_state_path(), state)
+}
+
+fn save_sessions_state_to(path: &Path, state: &SessionsState) -> Result<(), CliError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let contents = serde_json::to_string_pretty(state)?;
+    fs::write(path, format!("{contents}\n"))?;
+    Ok(())
+}
+
+fn load_appointed_session() -> Result<String, CliError> {
+    load_appointed_session_from(&appointment_path()?)
+}
+
+fn load_appointed_session_from(path: &Path) -> Result<String, CliError> {
+    match fs::read_to_string(path) {
+        Ok(contents) => {
+            let name = contents.trim();
+            if name.is_empty() {
+                Err(CliError::new("no session selected. Run: b session choose"))
+            } else {
+                Ok(name.to_string())
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Err(CliError::new("no session selected. Run: b session choose"))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn save_appointed_session(name: &str) -> Result<(), CliError> {
+    save_appointed_session_to(&appointment_path()?, name)
+}
+
+fn save_appointed_session_to(path: &Path, name: &str) -> Result<(), CliError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::write(path, format!("{name}\n"))?;
+    Ok(())
+}
+
+fn unset_appointed_session() -> Result<(), CliError> {
+    unset_appointed_session_from(&appointment_path()?)
+}
+
+fn unset_appointed_session_from(path: &Path) -> Result<(), CliError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn appointed_bookmarks<'a>(
+    state: &'a SessionsState,
+    name: &str,
+) -> Result<&'a BookmarkState, CliError> {
+    state
+        .sessions
+        .get(name)
+        .ok_or_else(|| CliError::new(format!("selected session '{name}' does not exist")))
+}
+
+fn appointed_bookmarks_mut<'a>(
+    state: &'a mut SessionsState,
+    name: &str,
+) -> Result<&'a mut BookmarkState, CliError> {
+    state
+        .sessions
+        .get_mut(name)
+        .ok_or_else(|| CliError::new(format!("selected session '{name}' does not exist")))
 }
 
 fn max_bookmarks() -> usize {
@@ -237,8 +423,9 @@ fn add(path_arg: Option<PathBuf>) -> Result<(), CliError> {
     let target = path_arg.unwrap_or(env::current_dir()?);
     let normalized = normalize_path(&target)?;
     let bookmark = path_to_string(&normalized)?;
-    let path = state_path();
-    let mut state = load_state(&path)?;
+    let session_name = load_appointed_session()?;
+    let mut sessions = load_sessions_state()?;
+    let state = appointed_bookmarks_mut(&mut sessions, &session_name)?;
 
     if state.bookmarks.contains(&bookmark) {
         println!("Already bookmarked: {bookmark}");
@@ -253,16 +440,16 @@ fn add(path_arg: Option<PathBuf>) -> Result<(), CliError> {
     }
 
     state.bookmarks.push(bookmark.clone());
-    save_state(&path, &state)?;
-    println!(
-        "Added [{index}] {bookmark}",
-        index = state.bookmarks.len() - 1
-    );
+    let index = state.bookmarks.len() - 1;
+    save_sessions_state(&sessions)?;
+    println!("Added [{index}] {bookmark}");
     Ok(())
 }
 
 fn list() -> Result<(), CliError> {
-    let state = load_state(&state_path())?;
+    let session_name = load_appointed_session()?;
+    let sessions = load_sessions_state()?;
+    let state = appointed_bookmarks(&sessions, &session_name)?;
 
     if state.bookmarks.is_empty() {
         println!("No bookmarks. Add one with: b add");
@@ -277,7 +464,9 @@ fn list() -> Result<(), CliError> {
 }
 
 fn path(index: usize) -> Result<(), CliError> {
-    let state = load_state(&state_path())?;
+    let session_name = load_appointed_session()?;
+    let sessions = load_sessions_state()?;
+    let state = appointed_bookmarks(&sessions, &session_name)?;
     let bookmark = state
         .bookmarks
         .get(index)
@@ -288,8 +477,9 @@ fn path(index: usize) -> Result<(), CliError> {
 }
 
 fn remove(index_arg: Option<usize>) -> Result<(), CliError> {
-    let path = state_path();
-    let mut state = load_state(&path)?;
+    let session_name = load_appointed_session()?;
+    let mut sessions = load_sessions_state()?;
+    let state = appointed_bookmarks_mut(&mut sessions, &session_name)?;
 
     if state.bookmarks.is_empty() {
         println!("No bookmarks to remove.");
@@ -308,9 +498,136 @@ fn remove(index_arg: Option<usize>) -> Result<(), CliError> {
     }
 
     let removed = state.bookmarks.remove(index);
-    save_state(&path, &state)?;
+    save_sessions_state(&sessions)?;
     println!("Removed [{index}] {removed}");
     Ok(())
+}
+
+fn session(command: SessionCommand) -> Result<(), CliError> {
+    match command {
+        SessionCommand::Ls => list_sessions(),
+        SessionCommand::New { name } => create_session(&name),
+        SessionCommand::Use { name, no_jump } => use_session(&name, no_jump),
+        SessionCommand::Choose { no_jump } => choose_session(no_jump),
+        SessionCommand::Unset => unset_session(),
+        SessionCommand::Current => {
+            println!("{}", load_appointed_session()?);
+            Ok(())
+        }
+    }
+}
+
+fn validate_session_name(name: &str) -> Result<(), CliError> {
+    let valid = !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+
+    if valid {
+        Ok(())
+    } else {
+        Err(CliError::new(
+            "session name must use lowercase letters, numbers, and hyphens",
+        ))
+    }
+}
+
+fn create_session(name: &str) -> Result<(), CliError> {
+    validate_session_name(name)?;
+    let mut state = load_sessions_state()?;
+
+    if state.sessions.contains_key(name) {
+        return Err(CliError::new(format!("session '{name}' already exists")));
+    }
+
+    state
+        .sessions
+        .insert(name.to_string(), BookmarkState::default());
+    save_sessions_state(&state)?;
+    println!("Created session: {name}");
+    Ok(())
+}
+
+fn list_sessions() -> Result<(), CliError> {
+    let state = load_sessions_state()?;
+
+    if state.sessions.is_empty() {
+        println!("No sessions. Create one with: b session new <name>");
+        return Ok(());
+    }
+
+    for (index, name) in state.sessions.keys().enumerate() {
+        println!("[{index}] {name}");
+    }
+
+    Ok(())
+}
+
+fn use_session(name: &str, no_jump: bool) -> Result<(), CliError> {
+    validate_session_name(name)?;
+    let state = load_sessions_state()?;
+
+    if !state.sessions.contains_key(name) {
+        return Err(CliError::new(format!("session '{name}' does not exist")));
+    }
+
+    save_appointed_session(name)?;
+    println!("Using session: {name}");
+    print_jump_target(&state, name, no_jump)?;
+    Ok(())
+}
+
+fn choose_session(no_jump: bool) -> Result<(), CliError> {
+    let state = load_sessions_state()?;
+    let names: Vec<&String> = state.sessions.keys().collect();
+
+    if names.is_empty() {
+        println!("No sessions. Create one with: b session new <name>");
+        return Ok(());
+    }
+
+    let index = prompt_session_index(&names)?;
+    let name = names
+        .get(index)
+        .ok_or_else(|| CliError::new(format!("session index {index} does not exist")))?;
+    save_appointed_session(name)?;
+    println!("Using session: {name}");
+    print_jump_target(&state, name, no_jump)?;
+    Ok(())
+}
+
+fn unset_session() -> Result<(), CliError> {
+    unset_appointed_session()?;
+    println!("Session unset");
+    Ok(())
+}
+
+fn print_jump_target(state: &SessionsState, name: &str, no_jump: bool) -> Result<(), CliError> {
+    if no_jump {
+        return Ok(());
+    }
+
+    let bookmarks = appointed_bookmarks(state, name)?;
+    if let Some(bookmark) = bookmarks.bookmarks.first() {
+        println!("Jumping to [0] {bookmark}");
+    } else {
+        println!("No bookmark at [0] to jump to. Add one with: b add");
+    }
+
+    Ok(())
+}
+
+fn prompt_session_index(names: &[&String]) -> Result<usize, CliError> {
+    for (index, name) in names.iter().enumerate() {
+        println!("[{index}] {name}");
+    }
+
+    print!("Session index: ");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    parse_index(Some(input.trim()))
 }
 
 fn prompt_remove_index(state: &BookmarkState) -> Result<usize, CliError> {
@@ -345,11 +662,34 @@ fi
 
 b() {
   if [ "$#" -eq 0 ]; then
+    if ! bmersive session current >/dev/null 2>&1; then
+      bmersive session choose || return
+      _bmersive_target="$(bmersive path 0 2>/dev/null)" && cd "$_bmersive_target"
+      unset _bmersive_target
+      return
+    fi
     bmersive ls
     return
   fi
 
   case "$1" in
+    session)
+      _bmersive_session_command="${2:-}"
+      shift
+      bmersive session "$@" || return
+      case "$_bmersive_session_command" in
+        use|choose)
+          case " $* " in
+            *" --no-jump "*) ;;
+            *)
+              _bmersive_target="$(bmersive path 0 2>/dev/null)" && cd "$_bmersive_target"
+              unset _bmersive_target
+              ;;
+          esac
+          ;;
+      esac
+      unset _bmersive_session_command
+      ;;
     add)
       shift
       bmersive add "$@"
@@ -380,7 +720,9 @@ fn tmux(mode_arg: Option<TmuxMode>) -> Result<(), CliError> {
     let mode = mode_arg
         .map(TmuxMode::as_str)
         .unwrap_or(default_tmux_mode());
-    let state = load_state(&state_path())?;
+    let session_name = load_appointed_session()?;
+    let sessions = load_sessions_state()?;
+    let state = appointed_bookmarks(&sessions, &session_name)?;
 
     if state.bookmarks.is_empty() {
         println!("No bookmarks to materialize. Add one with: b add");
@@ -390,10 +732,14 @@ fn tmux(mode_arg: Option<TmuxMode>) -> Result<(), CliError> {
     let inside_tmux = env::var_os("TMUX").is_some();
 
     match (mode, inside_tmux) {
-        ("windows", true) => run_tmux_actions(tmux_windows_actions(&state.bookmarks, true)),
-        ("panes", true) => run_tmux_actions(tmux_panes_actions(&state.bookmarks, true)),
-        ("windows", false) => tmux_outside_windows(&state.bookmarks),
-        ("panes", false) => tmux_outside_panes(&state.bookmarks),
+        ("windows", true) => {
+            run_tmux_actions(tmux_windows_actions(&session_name, &state.bookmarks, true))
+        }
+        ("panes", true) => {
+            run_tmux_actions(tmux_panes_actions(&session_name, &state.bookmarks, true))
+        }
+        ("windows", false) => tmux_outside_windows(&session_name, &state.bookmarks),
+        ("panes", false) => tmux_outside_panes(&session_name, &state.bookmarks),
         (other, _) => Err(CliError::new(format!("unsupported tmux mode: {other}"))),
     }
 }
@@ -402,7 +748,11 @@ fn default_tmux_mode() -> &'static str {
     "panes"
 }
 
-fn tmux_windows_actions(bookmarks: &[String], inside_tmux: bool) -> Vec<TmuxAction> {
+fn tmux_windows_actions(
+    session_name: &str,
+    bookmarks: &[String],
+    inside_tmux: bool,
+) -> Vec<TmuxAction> {
     if inside_tmux {
         return bookmarks
             .iter()
@@ -414,13 +764,14 @@ fn tmux_windows_actions(bookmarks: &[String], inside_tmux: bool) -> Vec<TmuxActi
             .collect();
     }
 
+    let tmux_session = tmux_session_name(session_name);
     let mut actions = vec![TmuxAction::HasSession {
-        session: SESSION_NAME.to_string(),
+        session: tmux_session.clone(),
     }];
 
     if let Some(first) = bookmarks.first() {
         actions.push(TmuxAction::NewSessionDetached {
-            session: SESSION_NAME.to_string(),
+            session: tmux_session.clone(),
             cwd: first.clone(),
             name: basename(first),
         });
@@ -438,12 +789,16 @@ fn tmux_windows_actions(bookmarks: &[String], inside_tmux: bool) -> Vec<TmuxActi
     }
 
     actions.push(TmuxAction::AttachSession {
-        session: SESSION_NAME.to_string(),
+        session: tmux_session,
     });
     actions
 }
 
-fn tmux_panes_actions(bookmarks: &[String], inside_tmux: bool) -> Vec<TmuxAction> {
+fn tmux_panes_actions(
+    session_name: &str,
+    bookmarks: &[String],
+    inside_tmux: bool,
+) -> Vec<TmuxAction> {
     let mut actions = Vec::new();
 
     if inside_tmux {
@@ -468,11 +823,12 @@ fn tmux_panes_actions(bookmarks: &[String], inside_tmux: bool) -> Vec<TmuxAction
     }
 
     if let Some(first) = bookmarks.first() {
+        let tmux_session = tmux_session_name(session_name);
         actions.push(TmuxAction::HasSession {
-            session: SESSION_NAME.to_string(),
+            session: tmux_session.clone(),
         });
         actions.push(TmuxAction::NewSessionDetached {
-            session: SESSION_NAME.to_string(),
+            session: tmux_session.clone(),
             cwd: first.clone(),
             name: basename(first),
         });
@@ -487,38 +843,41 @@ fn tmux_panes_actions(bookmarks: &[String], inside_tmux: bool) -> Vec<TmuxAction
         );
         actions.push(TmuxAction::SelectLayoutTiled { target: None });
         actions.push(TmuxAction::AttachSession {
-            session: SESSION_NAME.to_string(),
+            session: tmux_session,
         });
     }
 
     actions
 }
 
-fn tmux_outside_windows(bookmarks: &[String]) -> Result<(), CliError> {
-    if tmux_session_exists(SESSION_NAME)? {
-        return run_tmux(["attach-session", "-t", SESSION_NAME]);
+fn tmux_outside_windows(session_name: &str, bookmarks: &[String]) -> Result<(), CliError> {
+    let tmux_session = tmux_session_name(session_name);
+    if tmux_session_exists(&tmux_session)? {
+        return run_tmux(["attach-session", "-t", &tmux_session]);
     }
 
-    run_tmux_dynamic(tmux_outside_windows_args(bookmarks))
+    run_tmux_dynamic(tmux_outside_windows_args(session_name, bookmarks))
 }
 
-fn tmux_outside_panes(bookmarks: &[String]) -> Result<(), CliError> {
-    if tmux_session_exists(SESSION_NAME)? {
-        return run_tmux(["attach-session", "-t", SESSION_NAME]);
+fn tmux_outside_panes(session_name: &str, bookmarks: &[String]) -> Result<(), CliError> {
+    let tmux_session = tmux_session_name(session_name);
+    if tmux_session_exists(&tmux_session)? {
+        return run_tmux(["attach-session", "-t", &tmux_session]);
     }
 
-    run_tmux_dynamic(tmux_outside_panes_args(bookmarks))
+    run_tmux_dynamic(tmux_outside_panes_args(session_name, bookmarks))
 }
 
-fn tmux_outside_windows_args(bookmarks: &[String]) -> Vec<String> {
+fn tmux_outside_windows_args(session_name: &str, bookmarks: &[String]) -> Vec<String> {
     let mut args = Vec::new();
+    let tmux_session = tmux_session_name(session_name);
 
     if let Some(first) = bookmarks.first() {
         args.extend(strings([
             "new-session",
             "-d",
             "-s",
-            SESSION_NAME,
+            &tmux_session,
             "-c",
             first,
             "-n",
@@ -538,21 +897,22 @@ fn tmux_outside_windows_args(bookmarks: &[String]) -> Vec<String> {
         }
 
         args.push(";".to_string());
-        args.extend(strings(["attach-session", "-t", SESSION_NAME]));
+        args.extend(strings(["attach-session", "-t", &tmux_session]));
     }
 
     args
 }
 
-fn tmux_outside_panes_args(bookmarks: &[String]) -> Vec<String> {
+fn tmux_outside_panes_args(session_name: &str, bookmarks: &[String]) -> Vec<String> {
     let mut args = Vec::new();
+    let tmux_session = tmux_session_name(session_name);
 
     if let Some(first) = bookmarks.first() {
         args.extend(strings([
             "new-session",
             "-d",
             "-s",
-            SESSION_NAME,
+            &tmux_session,
             "-c",
             first,
             "-n",
@@ -567,10 +927,14 @@ fn tmux_outside_panes_args(bookmarks: &[String]) -> Vec<String> {
         args.push(";".to_string());
         args.extend(strings(["select-layout", "tiled"]));
         args.push(";".to_string());
-        args.extend(strings(["attach-session", "-t", SESSION_NAME]));
+        args.extend(strings(["attach-session", "-t", &tmux_session]));
     }
 
     args
+}
+
+fn tmux_session_name(session_name: &str) -> String {
+    format!("{SESSION_NAME}-{session_name}")
 }
 
 fn strings<const N: usize>(values: [&str; N]) -> Vec<String> {
@@ -732,6 +1096,99 @@ mod tests {
     }
 
     #[test]
+    fn sessions_state_path_prefers_xdg_state_home() {
+        assert_eq!(
+            sessions_state_path_from(
+                Some(OsString::from("/state")),
+                Some(OsString::from("/home/me")),
+                Some("me".to_string())
+            ),
+            PathBuf::from("/state/bmersive/sessions.json")
+        );
+    }
+
+    #[test]
+    fn sessions_state_path_uses_home_local_state() {
+        assert_eq!(
+            sessions_state_path_from(
+                None,
+                Some(OsString::from("/home/me")),
+                Some("me".to_string())
+            ),
+            PathBuf::from("/home/me/.local/state/bmersive/sessions.json")
+        );
+    }
+
+    #[test]
+    fn sessions_state_path_falls_back_to_tmp_user_dir() {
+        assert_eq!(
+            sessions_state_path_from(None, None, Some("testuser".to_string())),
+            PathBuf::from("/tmp/bmersive-testuser/sessions.json")
+        );
+    }
+
+    #[test]
+    fn appointment_path_requires_state_dir() {
+        assert_eq!(
+            appointment_path_from(Some(OsString::from("/tmp/bmersive-shell")))
+                .expect("appointment path"),
+            PathBuf::from("/tmp/bmersive-shell/session")
+        );
+        assert!(appointment_path_from(None).is_err());
+    }
+
+    #[test]
+    fn load_sessions_imports_legacy_bookmarks_when_new_state_missing() {
+        let root = temp_test_dir("legacy-import");
+        let sessions_path = root.join("sessions.json");
+        let legacy_path = root.join("bookmarks.json");
+        save_state(
+            &legacy_path,
+            &BookmarkState {
+                bookmarks: vec!["/work/api".to_string()],
+            },
+        )
+        .expect("save legacy state");
+
+        let state = load_sessions_state_from(&sessions_path, &legacy_path).expect("load sessions");
+        assert_eq!(
+            state
+                .sessions
+                .get(DEFAULT_IMPORTED_SESSION)
+                .expect("default session")
+                .bookmarks,
+            vec!["/work/api".to_string()]
+        );
+    }
+
+    #[test]
+    fn load_sessions_prefers_new_state_over_legacy() {
+        let root = temp_test_dir("new-state-precedence");
+        let sessions_path = root.join("sessions.json");
+        let legacy_path = root.join("bookmarks.json");
+        save_state(
+            &legacy_path,
+            &BookmarkState {
+                bookmarks: vec!["/work/legacy".to_string()],
+            },
+        )
+        .expect("save legacy state");
+
+        let mut sessions = SessionsState::default();
+        sessions.sessions.insert(
+            "api".to_string(),
+            BookmarkState {
+                bookmarks: vec!["/work/api".to_string()],
+            },
+        );
+        save_sessions_state_to(&sessions_path, &sessions).expect("save sessions state");
+
+        let state = load_sessions_state_from(&sessions_path, &legacy_path).expect("load sessions");
+        assert!(state.sessions.contains_key("api"));
+        assert!(!state.sessions.contains_key(DEFAULT_IMPORTED_SESSION));
+    }
+
+    #[test]
     fn max_bookmarks_uses_positive_config_or_default() {
         assert_eq!(max_bookmarks_from(Some("5")), 5);
         assert_eq!(max_bookmarks_from(Some("0")), DEFAULT_MAX_BOOKMARKS);
@@ -756,10 +1213,70 @@ mod tests {
     }
 
     #[test]
+    fn validates_session_names() {
+        assert!(validate_session_name("api").is_ok());
+        assert!(validate_session_name("api-web2").is_ok());
+        assert!(validate_session_name("Api").is_err());
+        assert!(validate_session_name("api_web").is_err());
+        assert!(validate_session_name("").is_err());
+    }
+
+    #[test]
+    fn parser_accepts_session_commands() {
+        assert!(Cli::try_parse_from(["bmersive", "session", "ls"]).is_ok());
+        assert!(Cli::try_parse_from(["bmersive", "session", "new", "api"]).is_ok());
+        assert!(Cli::try_parse_from(["bmersive", "session", "use", "api"]).is_ok());
+        assert!(Cli::try_parse_from(["bmersive", "session", "use", "api", "--no-jump"]).is_ok());
+        assert!(Cli::try_parse_from(["bmersive", "session", "choose"]).is_ok());
+        assert!(Cli::try_parse_from(["bmersive", "session", "choose", "--no-jump"]).is_ok());
+        assert!(Cli::try_parse_from(["bmersive", "session", "unset"]).is_ok());
+        assert!(Cli::try_parse_from(["bmersive", "session", "current"]).is_ok());
+        assert!(Cli::try_parse_from(["bmersive", "session", "new"]).is_err());
+    }
+
+    #[test]
+    fn unset_appointed_session_removes_marker_if_present() {
+        let root = temp_test_dir("unset-session");
+        let path = root.join("session");
+        save_appointed_session_to(&path, "api").expect("save appointment");
+        unset_appointed_session_from(&path).expect("unset appointment");
+        assert!(!path.exists());
+        unset_appointed_session_from(&path).expect("unset missing appointment");
+    }
+
+    #[test]
+    fn jump_target_output_uses_first_bookmark_unless_disabled() {
+        let mut sessions = SessionsState::default();
+        sessions.sessions.insert(
+            "api".to_string(),
+            BookmarkState {
+                bookmarks: vec!["/work/api".to_string()],
+            },
+        );
+
+        assert!(print_jump_target(&sessions, "api", false).is_ok());
+        assert!(print_jump_target(&sessions, "api", true).is_ok());
+    }
+
+    #[test]
+    fn shell_function_chooses_and_delegates_sessions() {
+        let shell = shell_function();
+        assert!(shell.contains("if ! bmersive session current >/dev/null 2>&1"));
+        assert!(shell.contains("bmersive session choose || return"));
+        assert!(shell.contains("bmersive session \"$@\""));
+        assert!(shell.contains("--no-jump"));
+        assert!(shell.contains(
+            "_bmersive_target=\"$(bmersive path 0 2>/dev/null)\" && cd \"$_bmersive_target\""
+        ));
+        assert!(shell.contains("bmersive add \"$@\""));
+        assert!(shell.contains("cd \"$(bmersive path \"$1\")\""));
+    }
+
+    #[test]
     fn tmux_windows_inside_current_session_creates_windows() {
         let bookmarks = vec!["/work/api".to_string(), "/work/web".to_string()];
         assert_eq!(
-            tmux_windows_actions(&bookmarks, true),
+            tmux_windows_actions("api", &bookmarks, true),
             vec![
                 TmuxAction::NewWindow {
                     target: None,
@@ -779,13 +1296,13 @@ mod tests {
     fn tmux_windows_outside_checks_session_then_creates_and_attaches() {
         let bookmarks = vec!["/work/api".to_string(), "/work/web".to_string()];
         assert_eq!(
-            tmux_windows_actions(&bookmarks, false),
+            tmux_windows_actions("api", &bookmarks, false),
             vec![
                 TmuxAction::HasSession {
-                    session: "bmersive".to_string()
+                    session: "bmersive-api".to_string()
                 },
                 TmuxAction::NewSessionDetached {
-                    session: "bmersive".to_string(),
+                    session: "bmersive-api".to_string(),
                     cwd: "/work/api".to_string(),
                     name: "api".to_string()
                 },
@@ -795,7 +1312,7 @@ mod tests {
                     name: "web".to_string()
                 },
                 TmuxAction::AttachSession {
-                    session: "bmersive".to_string()
+                    session: "bmersive-api".to_string()
                 }
             ]
         );
@@ -805,7 +1322,7 @@ mod tests {
     fn tmux_panes_inside_splits_additional_bookmarks_and_tiles() {
         let bookmarks = vec!["/work/api".to_string(), "/work/web".to_string()];
         assert_eq!(
-            tmux_panes_actions(&bookmarks, true),
+            tmux_panes_actions("api", &bookmarks, true),
             vec![
                 TmuxAction::NewWindow {
                     target: None,
@@ -825,13 +1342,13 @@ mod tests {
     fn tmux_panes_outside_targets_created_session() {
         let bookmarks = vec!["/work/api".to_string(), "/work/web".to_string()];
         assert_eq!(
-            tmux_panes_actions(&bookmarks, false),
+            tmux_panes_actions("api", &bookmarks, false),
             vec![
                 TmuxAction::HasSession {
-                    session: "bmersive".to_string()
+                    session: "bmersive-api".to_string()
                 },
                 TmuxAction::NewSessionDetached {
-                    session: "bmersive".to_string(),
+                    session: "bmersive-api".to_string(),
                     cwd: "/work/api".to_string(),
                     name: "api".to_string()
                 },
@@ -841,7 +1358,7 @@ mod tests {
                 },
                 TmuxAction::SelectLayoutTiled { target: None },
                 TmuxAction::AttachSession {
-                    session: "bmersive".to_string()
+                    session: "bmersive-api".to_string()
                 }
             ]
         );
@@ -851,12 +1368,12 @@ mod tests {
     fn tmux_outside_windows_uses_single_command_sequence() {
         let bookmarks = vec!["/work/api".to_string(), "/work/web".to_string()];
         assert_eq!(
-            tmux_outside_windows_args(&bookmarks),
+            tmux_outside_windows_args("api", &bookmarks),
             vec![
                 "new-session",
                 "-d",
                 "-s",
-                "bmersive",
+                "bmersive-api",
                 "-c",
                 "/work/api",
                 "-n",
@@ -871,21 +1388,26 @@ mod tests {
                 ";",
                 "attach-session",
                 "-t",
-                "bmersive"
+                "bmersive-api"
             ]
         );
     }
 
     #[test]
-    fn tmux_outside_panes_uses_single_command_sequence() {
-        let bookmarks = vec!["/work/api".to_string(), "/work/web".to_string()];
+    fn tmux_outside_panes_uses_single_command_sequence_for_four_bookmarks() {
+        let bookmarks = vec![
+            "/work/api".to_string(),
+            "/work/web".to_string(),
+            "/work/worker".to_string(),
+            "/work/infra".to_string(),
+        ];
         assert_eq!(
-            tmux_outside_panes_args(&bookmarks),
+            tmux_outside_panes_args("api", &bookmarks),
             vec![
                 "new-session",
                 "-d",
                 "-s",
-                "bmersive",
+                "bmersive-api",
                 "-c",
                 "/work/api",
                 "-n",
@@ -895,13 +1417,31 @@ mod tests {
                 "-c",
                 "/work/web",
                 ";",
+                "split-window",
+                "-c",
+                "/work/worker",
+                ";",
+                "split-window",
+                "-c",
+                "/work/infra",
+                ";",
                 "select-layout",
                 "tiled",
                 ";",
                 "attach-session",
                 "-t",
-                "bmersive"
+                "bmersive-api"
             ]
         );
+    }
+
+    fn temp_test_dir(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let path = env::temp_dir().join(format!("bmersive-test-{name}-{nanos}"));
+        fs::create_dir_all(&path).expect("create temp dir");
+        path
     }
 }

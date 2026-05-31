@@ -1,15 +1,4 @@
-## Purpose
-
-Create or reuse tmux layouts from the appointed saved session's curated bookmark list.
-
-## Requirements
-
-### Requirement: Default tmux mode creates panes
-The system SHALL treat `bmersive tmux` as `bmersive tmux panes`.
-
-#### Scenario: Default tmux mode
-- **WHEN** the user runs `bmersive tmux`
-- **THEN** the system uses panes mode
+## ADDED Requirements
 
 ### Requirement: Use appointed session for tmux layouts
 The system SHALL create tmux layouts from the appointed session's bookmark list.
@@ -22,6 +11,15 @@ The system SHALL create tmux layouts from the appointed session's bookmark list.
 - **WHEN** session `web` is appointed and the user runs `bmersive tmux windows`
 - **THEN** the system creates windows from `web` bookmarks only
 
+### Requirement: Name outside tmux session from appointed session
+The system SHALL use a tmux session name derived from the appointed saved session when creating or attaching outside tmux.
+
+#### Scenario: Outside tmux named session
+- **WHEN** session `api` is appointed and the user runs `bmersive tmux panes` outside tmux
+- **THEN** the system creates or attaches a tmux session named for `api` rather than a single global session name
+
+## MODIFIED Requirements
+
 ### Requirement: Create tmux windows from bookmarks
 The system SHALL create one tmux window per appointed-session bookmark in windows mode, using each bookmark path as the window working directory.
 
@@ -29,26 +27,12 @@ The system SHALL create one tmux window per appointed-session bookmark in window
 - **WHEN** the appointed session bookmark list contains three directories and the user runs `bmersive tmux windows`
 - **THEN** the system creates three tmux windows with those directories as working directories
 
-### Requirement: Name tmux windows from basenames
-The system SHALL name tmux windows from the bookmark directory basename where possible.
-
-#### Scenario: Window basename
-- **WHEN** a bookmark path is `/work/api`
-- **THEN** the created tmux window name is based on `api`
-
 ### Requirement: Operate on current tmux session when inside tmux
 The system SHALL operate on the current tmux session when `TMUX` indicates the command is running inside tmux, using bookmarks from the appointed saved session.
 
 #### Scenario: Inside tmux windows mode
 - **WHEN** session `api` is appointed and the user runs `bmersive tmux windows` from inside tmux
 - **THEN** the system creates `api` bookmark windows in the current tmux session
-
-### Requirement: Name outside tmux session from appointed session
-The system SHALL use a tmux session name derived from the appointed saved session when creating or attaching outside tmux.
-
-#### Scenario: Outside tmux named session
-- **WHEN** session `api` is appointed and the user runs `bmersive tmux panes` outside tmux
-- **THEN** the system creates or attaches a tmux session named for `api` rather than a single global session name
 
 ### Requirement: Attach or create bmersive tmux session outside tmux
 The system SHALL attach to an existing tmux session for the appointed saved session when outside tmux, and SHALL create a new session-specific tmux session from bookmarks when no such session exists.
@@ -74,18 +58,3 @@ The system SHALL handle tmux commands with an empty appointed-session bookmark l
 #### Scenario: Empty bookmarks for tmux
 - **WHEN** the appointed session bookmark list is empty and the user runs `bmersive tmux`
 - **THEN** the system reports that there are no bookmarks to materialize and exits without creating bookmark panes or windows
-
-### Requirement: Tmux command uses standardized CLI parsing
-The system SHALL expose `bmersive tmux [mode]` through the standardized CLI parser while preserving existing tmux materialization behavior.
-
-#### Scenario: Default tmux mode through parser
-- **WHEN** the user runs `bmersive tmux`
-- **THEN** the parser accepts the omitted mode and the system uses panes mode
-
-#### Scenario: Explicit tmux mode through parser
-- **WHEN** the user runs `bmersive tmux windows` or `bmersive tmux panes`
-- **THEN** the parser accepts the mode and the system applies the existing tmux behavior for that mode
-
-#### Scenario: Unsupported tmux mode is rejected
-- **WHEN** the user runs `bmersive tmux <unsupported-mode>`
-- **THEN** the system exits with an error and does not perform tmux side effects

@@ -1,19 +1,4 @@
-## Purpose
-
-Define the standard command-line interface contract, parser behavior, session management surface, and dependency policy for `bmersive` commands.
-
-## Requirements
-
-### Requirement: Use standardized CLI parser
-The system SHALL parse top-level commands and command arguments using a standardized Rust CLI parser dependency that is permissively licensed, current, and community healthy.
-
-#### Scenario: Supported command is parsed
-- **WHEN** the user runs a supported `bmersive` command
-- **THEN** the system dispatches the command through the standardized parser before executing command behavior
-
-#### Scenario: Dependency policy is satisfied
-- **WHEN** the CLI parser dependency is added
-- **THEN** it uses a non-copyleft license and a current stable version from a healthy Rust CLI project
+## ADDED Requirements
 
 ### Requirement: Expose session command group
 The system SHALL expose a `bmersive session` command group for saved session management.
@@ -69,6 +54,8 @@ The system SHALL expose a command to clear the appointed session for the current
 - **WHEN** the user runs `bmersive session unset`
 - **THEN** the parser accepts the command and clears the appointed session
 
+## MODIFIED Requirements
+
 ### Requirement: Preserve command surface
 The system SHALL preserve the existing public command names and accepted positional arguments for `init`, `add`, `ls`, `path`, `rm`, and `tmux`, and SHALL add the `session` command group for saved session management.
 
@@ -91,13 +78,6 @@ The system SHALL provide parser-generated help output for the top-level CLI, sup
 - **WHEN** the user requests help for a supported command or session subcommand
 - **THEN** the system prints help output for that command's accepted arguments
 
-### Requirement: Generate version output
-The system SHALL provide parser-generated version output using the package version.
-
-#### Scenario: Version flag
-- **WHEN** the user runs `bmersive --version` or `bmersive -V`
-- **THEN** the system prints the `bmersive` package version
-
 ### Requirement: Reject invalid CLI input consistently
 The system SHALL reject unknown commands and invalid argument forms before command side effects occur.
 
@@ -112,10 +92,3 @@ The system SHALL reject unknown commands and invalid argument forms before comma
 #### Scenario: Invalid session name form
 - **WHEN** the user runs a session command with an invalid session name
 - **THEN** the system exits with an error and does not create or appoint a session
-
-### Requirement: Defer application configuration framework
-The system SHALL NOT introduce a Viper-like application configuration dependency as part of CLI parser standardization.
-
-#### Scenario: Configuration remains environment based
-- **WHEN** the CLI parser is standardized
-- **THEN** existing environment-based configuration and bookmark state handling remain implemented without a new configuration framework
