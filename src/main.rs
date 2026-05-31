@@ -488,7 +488,7 @@ fn remove(index_arg: Option<usize>) -> Result<(), CliError> {
 
     let index = match index_arg {
         Some(index) => index,
-        None => prompt_remove_index(&state)?,
+        None => prompt_remove_index(state)?,
     };
 
     if index >= state.bookmarks.len() {
