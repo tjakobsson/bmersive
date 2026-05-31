@@ -19,9 +19,16 @@ fn run(runtime: &Path, args: &[&str]) -> std::process::Output {
     Command::new(binary())
         .args(args)
         .env("XDG_RUNTIME_DIR", runtime)
+        .env("XDG_STATE_HOME", runtime.join("state"))
+        .env("BMERSIVE_STATE_DIR", runtime.join("shell"))
         .env_remove("BMERSIVE_MAX_BOOKMARKS")
         .output()
         .expect("run bmersive test command")
+}
+
+fn create_and_use_session(runtime: &Path, name: &str) {
+    assert!(run(runtime, &["session", "new", name]).status.success());
+    assert!(run(runtime, &["session", "use", name]).status.success());
 }
 
 fn run_without_runtime(args: &[&str]) -> std::process::Output {
@@ -38,6 +45,7 @@ fn add_list_path_and_remove_bookmarks() {
     let second = runtime.join("two");
     fs::create_dir_all(&first).expect("create first test bookmark directory");
     fs::create_dir_all(&second).expect("create second test bookmark directory");
+    create_and_use_session(&runtime, "crud");
 
     assert!(run(
         &runtime,
@@ -85,6 +93,7 @@ fn duplicate_add_does_not_create_second_entry() {
     let runtime = temp_runtime("duplicate");
     let project = runtime.join("project");
     fs::create_dir_all(&project).expect("create duplicate test bookmark directory");
+    create_and_use_session(&runtime, "duplicate");
 
     assert!(run(
         &runtime,
@@ -112,16 +121,77 @@ fn duplicate_add_does_not_create_second_entry() {
 }
 
 #[test]
+fn session_use_reports_default_jump_and_no_jump_opts_out() {
+    let runtime = temp_runtime("session-jump");
+    let project = runtime.join("project");
+    fs::create_dir_all(&project).expect("create jump test bookmark directory");
+
+    assert!(run(&runtime, &["session", "new", "api"]).status.success());
+    assert!(run(&runtime, &["session", "use", "api", "--no-jump"])
+        .status
+        .success());
+    assert!(run(
+        &runtime,
+        &["add", project.to_str().expect("project path is UTF-8")]
+    )
+    .status
+    .success());
+
+    let use_with_jump = run(&runtime, &["session", "use", "api"]);
+    assert!(use_with_jump.status.success());
+    let stdout = String::from_utf8(use_with_jump.stdout).expect("use output is UTF-8");
+    assert!(stdout.contains("Using session: api"));
+    assert!(stdout.contains("Jumping to [0]"));
+    assert!(stdout.contains(project.to_str().expect("project path is UTF-8")));
+
+    let use_without_jump = run(&runtime, &["session", "use", "api", "--no-jump"]);
+    assert!(use_without_jump.status.success());
+    let stdout = String::from_utf8(use_without_jump.stdout).expect("use no-jump output is UTF-8");
+    assert!(stdout.contains("Using session: api"));
+    assert!(!stdout.contains("Jumping to [0]"));
+}
+
+#[test]
+fn session_unset_clears_current_appointment() {
+    let runtime = temp_runtime("session-unset");
+    create_and_use_session(&runtime, "api");
+
+    let current = run(&runtime, &["session", "current"]);
+    assert!(current.status.success());
+    assert_eq!(
+        String::from_utf8(current.stdout)
+            .expect("current output is UTF-8")
+            .trim(),
+        "api"
+    );
+
+    let unset = run(&runtime, &["session", "unset"]);
+    assert!(unset.status.success());
+    assert!(String::from_utf8(unset.stdout)
+        .expect("unset output is UTF-8")
+        .contains("Session unset"));
+
+    let current = run(&runtime, &["session", "current"]);
+    assert!(!current.status.success());
+    assert!(String::from_utf8(current.stderr)
+        .expect("current stderr is UTF-8")
+        .contains("no session selected"));
+}
+
+#[test]
 fn configured_max_rejects_full_list() {
     let runtime = temp_runtime("max");
     let first = runtime.join("one");
     let second = runtime.join("two");
     fs::create_dir_all(&first).expect("create first max test directory");
     fs::create_dir_all(&second).expect("create second max test directory");
+    create_and_use_session(&runtime, "max");
 
     let add_first = Command::new(binary())
         .args(["add", first.to_str().expect("first path is UTF-8")])
         .env("XDG_RUNTIME_DIR", &runtime)
+        .env("XDG_STATE_HOME", runtime.join("state"))
+        .env("BMERSIVE_STATE_DIR", runtime.join("shell"))
         .env("BMERSIVE_MAX_BOOKMARKS", "1")
         .output()
         .expect("run first max add command");
@@ -130,6 +200,8 @@ fn configured_max_rejects_full_list() {
     let add_second = Command::new(binary())
         .args(["add", second.to_str().expect("second path is UTF-8")])
         .env("XDG_RUNTIME_DIR", &runtime)
+        .env("XDG_STATE_HOME", runtime.join("state"))
+        .env("BMERSIVE_STATE_DIR", runtime.join("shell"))
         .env("BMERSIVE_MAX_BOOKMARKS", "1")
         .output()
         .expect("run second max add command");
@@ -149,6 +221,9 @@ fn init_outputs_shell_wrapper() {
     let stdout = String::from_utf8(zsh.stdout).expect("zsh init output is UTF-8");
     assert!(stdout.contains("b()"));
     assert!(stdout.contains("bmersive ls"));
+    assert!(stdout.contains("bmersive session choose || return"));
+    assert!(stdout.contains("--no-jump"));
+    assert!(stdout.contains("bmersive path 0"));
     assert!(stdout.contains("cd \"$(bmersive path \"$1\")\""));
 
     let bash = Command::new(binary())
@@ -172,6 +247,7 @@ fn generated_help_lists_supported_commands() {
     assert!(stdout.contains("ls"));
     assert!(stdout.contains("path"));
     assert!(stdout.contains("rm"));
+    assert!(stdout.contains("session"));
     assert!(stdout.contains("tmux"));
 
     let help_command = run_without_runtime(&["help"]);
@@ -224,5 +300,9 @@ fn invalid_cli_input_fails_before_side_effects() {
         .expect("missing index stderr is UTF-8")
         .contains("required arguments"));
 
-    assert!(!runtime.join("bmersive").join("bookmarks.json").exists());
+    assert!(!runtime
+        .join("state")
+        .join("bmersive")
+        .join("sessions.json")
+        .exists());
 }
